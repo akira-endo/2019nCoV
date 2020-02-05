@@ -103,53 +103,34 @@ function sysresample(weights)
     freqs=randomiser.-[0; randomiser[1:end-1]]
     return(reduce(vcat,fill.(1:size,freqs)))
 end
-
-function discreteapproxsampler(densityfunc,upper,tol=1e-4)
-    u=rand()
-    sumcdf=0.0
-    Δcdf=0.0
-    xmax=0
-    while xmax≤upper ||  Δcdf/sumcdf>tol
-        Δcdf=densityfunc(xmax)
-        sumcdf+=Δcdf
-        xmax+=1
-    end
-    funccdf=0.0
-    xsample=0
-    for x in 0:xmax-1
-        xsample=x
-        funccdf+=densityfunc(x)/sumcdf
-        if funccdf≥u break end
-    end
-    return(xsample)
-end
 # -
 
 # ## Simulation functions
 
 # +
-using Distributions, StatsFuns, StatsBase
-function smcinfness!(infness::NamedTuple{(:imported,:loc),T} where T,hazard::Matrix{<:AbstractFloat},cases::NamedTuple{(:imported,:loc),T} where T,nbparm,gtimevec)
+using Distributions, StatsFuns, StatsBase, SpecialFunctions
+function smcinfness!(infness::NamedTuple{(:imported,:loc),T} where T,lochazard::Matrix{<:AbstractFloat},cases::NamedTuple{(:imported,:loc),T} where T,nbparm,gtimevec)
     nsample=size(infness.imported,2)
     lweights=zeros(nsample)
     lkh=zeros(nsample)
-    α,θ=nbparm
+    α,p=nbparm
+    θ=(1-p)/p
     for t in 1:length(cases.loc)
         if cases.imported[t] != 0
             # draw gamma: total offsprings
             infness.imported[t,:].=rand(Gamma(α*cases.imported[t],θ),nsample)
             #distribute infness on timeline
-            @views hazard[t+1:end,:].+=infness.imported[t:t,:].*gtimevec[1:length(cases.loc)-t]
+            @views lochazard[t+1:end,:].+=infness.imported[t:t,:].*gtimevec[1:length(cases.loc)-t]
         end
         if cases.loc[t] != 0
             # draw gamma: total offsprings
             infness.loc[t,:].=rand(Gamma(α*cases.loc[t],θ),nsample)
             #distribute infness on timeline
-            @views hazard[t+1:end,:].+=infness.loc[t:t,:].*gtimevec[1:length(cases.loc)-t]
+            @views lochazard[t+1:end,:].+=infness.loc[t:t,:].*gtimevec[1:length(cases.loc)-t]
         end
         
         # filter particle
-        @views lweights.+=logpdf.(Poisson.(hazard[t,:]),cases.loc[t])
+        @views lweights.+=logpdf.(Poisson.(lochazard[t,:]),cases.loc[t])
         #if(2logsumexp(weights)-logsumexp(2 .*weights)< log(nsample)-log(2))
             # resample
 
@@ -159,7 +140,7 @@ function smcinfness!(infness::NamedTuple{(:imported,:loc),T} where T,hazard::Mat
             newid=sysresample(exp.(lweights))
             @views infness.imported[1:t,:].=infness.imported[1:t,newid]
             @views infness.loc[1:t,:].=infness.loc[1:t,newid]
-            @views hazard[1:t,:].=hazard[1:t,newid]
+            @views lochazard[1:t,:].=lochazard[1:t,newid]
             @views lkh.=lkh[newid]
             lweights.=0.0
         #end
@@ -167,31 +148,77 @@ function smcinfness!(infness::NamedTuple{(:imported,:loc),T} where T,hazard::Mat
     return(lkh)
 end
 
-function infnessgibbs!(infness,hazard,nsamples,branchdist,gtimedist,tlen,cases)
+function infnessgibbs!(infness,lochazard,nsamples,branchdist,gtimedist,tlen,cases)
     # infness
     infness_pts=(imported=zeros(tlen,nsamples), loc=zeros(tlen,nsamples))
-    hazard_pts=zeros(tlen,nsamples)
+    lochazard_pts=zeros(tlen,nsamples)
     gtimevec=diff(cdf.(gtimedist,0:tlen))
-    count=0
+    counts=0
     lls=zeros(nsamples)
     while true
         infness_pts.imported.=0.0
         infness_pts.loc.=0.0
-        hazard_pts.=0.0
-        lls.=smcinfness!(infness_pts,hazard_pts,cases,params(branchdist),gtimevec)
-        count+=1
+        lochazard_pts.=0.0
+        lls.=smcinfness!(infness_pts,lochazard_pts,cases,params(branchdist),gtimevec)
+        counts+=1
         if sum(lls)>-Inf break end
-        if count>100 error("infness could not be sampled in 100 SMC iterations") end
+        if counts>100 error("infness could not be sampled in 100 SMC iterations") end
     end
     # sample from lls
     sampleid=sample(Weights(exp.(lls.-maximum(lls))))
     if isnan(sampleid) sanpleid=1 end
     @views infness.imported.=infness_pts.imported[:,sampleid]
     @views infness.loc.=infness_pts.loc[:,sampleid]
+    @views lochazard.=lochazard_pts[:,sampleid]
     lls
 end
-
-
+module ApproxSampler
+using Distributions, SpecialFunctions
+struct Vars_t{F<:AbstractFloat,T,I<:Integer}
+    infness::F
+    hazard::F
+    nbparm::T
+    observed::I
+    detectprob::F
+end
+function poisgammacond(vars::Vars_t,x::I where I<:Integer)
+    if vars.observed==0 && x==0 return(exp(-vars.hazard)*typeof(vars.infness)(vars.infness==0.0)) end
+    α,p=vars.nbparm
+    θ=(1-p)/p
+    poismean=(1-vars.detectprob)*vars.hazard*(vars.infness/θ)^α
+    pdf(Poisson(poismean),x)/gamma(α*(vars.observed+x))
+end
+function discreteapproxsampler(densityfunc,paramobj,upper,tol=1e-4)
+    u=rand()
+    sumcdf=0.0
+    Δcdf=0.0
+    xmax=0
+    while xmax≤upper ||  Δcdf/sumcdf>tol
+        Δcdf=densityfunc(paramobj,xmax)
+        sumcdf+=Δcdf
+        xmax+=1
+    end
+    funccdf=0.0
+    xsample=0
+    for x in 0:xmax-1
+        xsample=x
+        funccdf+=densityfunc(paramobj,x)/sumcdf
+        if funccdf≥u break end
+    end
+    return(xsample)
+end
+end
+function casescondsampler!(cases,infness,hazard,nbparm,observed,detectprob)
+    for tag in (:imported,:loc)
+        cases[tag].=ApproxSampler.discreteapproxsampler.(
+            ApproxSampler.poisgammacond,
+            ApproxSampler.Vars_t.(infness[tag],hazard[tag],Ref(nbparm),observed[tag],detectprob),
+            hazard[tag]
+        )
+    end
+end
+function casesgibbs()
+end
 
 # +
 # test simulation run
@@ -201,13 +228,15 @@ R0=2
 k=0.5
 λ0=0.02
 r=0.01
+q=0.1
 
+cases=(imported=observed.imported,loc=observed.loc)
 importhazard=[λ0*exp(r*t) for t in 1:tlen]
-#@time clustersamples=importcluster(100,NBmu(2,1),serialint.dist,tlen,importhazard)
-
-infness=(imported=zeros(tlen),loc=zeros(tlen))
-hazard=zeros(tlen)
-@time infnessgibbs!(infness,hazard,500,nb,gt,tlen,cases);
+lochazard=ones(tlen)
+hazard=(imported=importhazard,loc=lochazard)
+infness=(imported=observed.imported.+0.0,loc=observed.loc.+0.0)
+@time infnessgibbs!(infness,hazard.loc,500,nb,gt,tlen,cases);
+@time casescondsampler!(cases,infness,hazard,params(nb),observed,q)
 # -
 
 # ## MCMC sampling
@@ -283,7 +312,8 @@ function importandbranch!(cases::NamedTuple{(:imported,:loc,:infness,:hazard),NT
         
         # draw gamma: total offsprings
         if currinfs!=0
-            α,θ=nbparm
+            α,p=nbparm
+            θ=(1-p)/p
             cases.infness[t]=rand(Gamma(α*currinfs,θ))
             #distribute infness on timeline
             cases.hazard[t+1:end].+=cases.infness[t].*gtimevec[1:length(cases.loc)-t]
