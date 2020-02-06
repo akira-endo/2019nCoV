@@ -192,7 +192,7 @@ function smcinfcases!(infness::NamedTuple{(:imported,:loc),T} where T,cases::Nam
             @views lweights.+=logpdf.(Poisson.(detectprob[t].*hazard[tag][t,:]),observed[tag][t])
         end
         
-        #if(2logsumexp(weights)-logsumexp(2 .*weights)< log(nsample)-log(2))
+        if(2logsumexp(lweights)-logsumexp(2 .*lweights)< log(nsample)-log(2))
         # resample
             lkh.+=lweights
         if all(lweights.≤-Inf) break end
@@ -205,7 +205,7 @@ function smcinfcases!(infness::NamedTuple{(:imported,:loc),T} where T,cases::Nam
             @views hazard.loc[1:t,:].=hazard.loc[1:t,newid]
             @views lkh.=lkh[newid]
             lweights.=0.0
-        #end
+        end
     end
     return(lkh)
 end
@@ -284,6 +284,7 @@ function casescondsampler!(cases,infness,hazard,nbparm,observed,detectprob)
     end
 end
 function casesgibbs()
+    
 end
 
 # +
@@ -301,9 +302,10 @@ importhazard=[λ0*exp(r*t) for t in 1:tlen]
 lochazard=ones(tlen)
 hazard=(imported=importhazard,loc=lochazard)
 infness=(imported=observed.imported.+0.0,loc=observed.loc.+0.0)
-#@time lls=infcasesgibbs!(infness,cases,hazard,1000,nb,gt,observed,qt,tlen)
-@time lls=infnessgibbs!(infness,hazard.loc,500,nb,gt,tlen,cases);
-#@time casescondsampler!(cases,infness,hazard,params(nb),observed,q)
+@time lls=infcasesgibbs!(infness,cases,hazard,2000,nb,gt,observed,qt,tlen)
+#@time lls=infnessgibbs!(infness,hazard.loc,500,nb,gt,tlen,cases);
+#@time casescondsampler!(cases,infness,hazard,params(nb),observed,q);
+R.table(lls)
 # -
 
 # ## MCMC sampling
