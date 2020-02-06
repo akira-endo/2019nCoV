@@ -172,6 +172,69 @@ function infnessgibbs!(infness,lochazard,nsamples,branchdist,gtimedist,tlen,case
     @views lochazard.=lochazard_pts[:,sampleid]
     lls
 end
+
+function smcinfcases!(infness::NamedTuple{(:imported,:loc),T} where T,cases::NamedTuple{(:imported,:loc),T} where T,hazard::NamedTuple{(:imported,:loc),T} where T,nbparm,gtimevec,observed,detectprob)
+    nsample=size(infness.imported,2)
+    lweights=zeros(nsample)
+    lkh=zeros(nsample)
+    α,p=nbparm
+    θ=(1-p)/p
+    for t in 1:length(observed.loc)
+        # draw cases
+        for tag in keys(cases)
+            #draw cases
+            @views cases[tag][t,:].=observed[tag][t].+rand.(Poisson.((1-detectprob[t]).*hazard[tag][t,:]))
+            #draw gamma: total offsprings
+            nonzerocase=cases[tag][t,:].!=0 # to avoid Gamma(0,θ)
+            if sum(nonzerocase)!=0 @views infness[tag][t,nonzerocase].=rand.(Gamma.(α.*cases[tag][t,nonzerocase],θ)) end
+            #distribute infness on timeline
+            hazard.loc[t+1:end,:] .+= (@view infness[tag][t:t,:]).*gtimevec[1:length(observed.loc)-t]
+            @views lweights.+=logpdf.(Poisson.(detectprob[t].*hazard[tag][t,:]),observed[tag][t])
+        end
+        
+        #if(2logsumexp(weights)-logsumexp(2 .*weights)< log(nsample)-log(2))
+        # resample
+            lkh.+=lweights
+        if all(lweights.≤-Inf) break end
+            lweights.-=maximum(lweights)
+            newid=sysresample(exp.(lweights))
+        for tag in keys(cases)
+            @views infness[tag][1:t,:].=infness[tag][1:t,newid]
+            @views cases[tag][1:t,:].=cases[tag][1:t,newid]
+        end
+            @views hazard.loc[1:t,:].=hazard.loc[1:t,newid]
+            @views lkh.=lkh[newid]
+            lweights.=0.0
+        #end
+    end
+    return(lkh)
+end
+function infcasesgibbs!(infness,cases,hazard,nsamples,branchdist,gtimedist,observed,detectprob,tlen)
+    # infness
+    infness_pts=(imported=zeros(tlen,nsamples), loc=zeros(tlen,nsamples))
+    hazard_pts=(imported=hazard.imported,loc=zeros(tlen,nsamples))
+    cases_pts=(imported=zeros(Int,tlen,nsamples),loc=zeros(Int,tlen,nsamples))
+    gtimevec=diff(cdf.(gtimedist,0:tlen))
+    counts=0
+    lls=zeros(nsamples)
+    while true
+        infness_pts.imported.=0.0
+        infness_pts.loc.=0.0
+        hazard_pts.loc.=0.0
+        lls.=smcinfcases!(infness_pts,cases_pts,hazard_pts,params(branchdist),gtimevec,observed,detectprob)
+        counts+=1
+        if sum(lls)>-Inf break end
+        if counts>100 error("infness could not be sampled in 100 SMC iterations") end
+    end
+    # sample from lls
+    sampleid=sample(Weights(exp.(lls.-maximum(lls))))
+    if isnan(sampleid) sanpleid=1 end
+    @views infness.imported.=infness_pts.imported[:,sampleid]
+    @views infness.loc.=infness_pts.loc[:,sampleid]
+    @views hazard.loc.=hazard_pts.loc[:,sampleid]
+    lls
+end
+
 module ApproxSampler
 using Distributions, SpecialFunctions
 struct Vars_t{F<:AbstractFloat,T,I<:Integer}
@@ -182,7 +245,10 @@ struct Vars_t{F<:AbstractFloat,T,I<:Integer}
     detectprob::F
 end
 function poisgammacond(vars::Vars_t,x::I where I<:Integer)
-    if vars.observed==0 && x==0 return(exp(-vars.hazard)*typeof(vars.infness)(vars.infness==0.0)) end
+    if infness==0.0
+        return(pdf(Poisson(vars.hazard),x)) #!!incomplete
+    end
+    if vars.observed==0 && x==0 return(exp(-vars.hazard)) end #!!incomplete
     α,p=vars.nbparm
     θ=(1-p)/p
     poismean=(1-vars.detectprob)*vars.hazard*(vars.infness/θ)^α
@@ -210,11 +276,11 @@ end
 end
 function casescondsampler!(cases,infness,hazard,nbparm,observed,detectprob)
     for tag in (:imported,:loc)
-        cases[tag].=ApproxSampler.discreteapproxsampler.(
-            ApproxSampler.poisgammacond,
-            ApproxSampler.Vars_t.(infness[tag],hazard[tag],Ref(nbparm),observed[tag],detectprob),
-            hazard[tag]
-        )
+        cases[tag].=observed[tag].+
+            ApproxSampler.discreteapproxsampler.(
+                ApproxSampler.poisgammacond,
+                ApproxSampler.Vars_t.(infness[tag],hazard[tag],Ref(nbparm),observed[tag],detectprob),
+                hazard[tag])
     end
 end
 function casesgibbs()
@@ -228,15 +294,16 @@ R0=2
 k=0.5
 λ0=0.02
 r=0.01
-q=0.1
+qt=fill(0.1,tlen)
 
 cases=(imported=observed.imported,loc=observed.loc)
 importhazard=[λ0*exp(r*t) for t in 1:tlen]
 lochazard=ones(tlen)
 hazard=(imported=importhazard,loc=lochazard)
 infness=(imported=observed.imported.+0.0,loc=observed.loc.+0.0)
-@time infnessgibbs!(infness,hazard.loc,500,nb,gt,tlen,cases);
-@time casescondsampler!(cases,infness,hazard,params(nb),observed,q)
+#@time lls=infcasesgibbs!(infness,cases,hazard,1000,nb,gt,observed,qt,tlen)
+@time lls=infnessgibbs!(infness,hazard.loc,500,nb,gt,tlen,cases);
+#@time casescondsampler!(cases,infness,hazard,params(nb),observed,q)
 # -
 
 # ## MCMC sampling
