@@ -130,64 +130,73 @@ using Distributions, StatsFuns, StatsBase, SpecialFunctions
 function smcinfcases!(infness::NamedTuple{(:imported,:loc),T} where T,cases::NamedTuple{(:imported,:loc),T} where T,hazard::NamedTuple{(:imported,:loc),T} where T,nbparm,gtimevec,observed,detectprob)
     nsample=size(infness.imported,2)
     lweights=zeros(nsample)
-    lkh=zeros(nsample)
+    llkh=0.0
     α,p=nbparm
     θ=(1-p)/p
     for t in 1:length(observed.loc)
         # draw cases
+        @views cases.imported[t,2:end].=observed.imported[t].+rand.(Poisson.((1-detectprob[t]).*hazard.imported[t]))
+        @views cases.loc[t,2:end].=observed.loc[t].+rand.(Poisson.((1-detectprob[t]).*hazard.loc[t,2:end]))
         for tag in keys(cases)
-            #draw cases
-            @views cases[tag][t,:].=observed[tag][t].+rand.(Poisson.((1-detectprob[t]).*hazard[tag][t,:]))
             #draw gamma: total offsprings
-            nonzerocase=cases[tag][t,:].!=0 # to avoid Gamma(0,θ)
-            if sum(nonzerocase)!=0 @views infness[tag][t,nonzerocase].=rand.(Gamma.(α.*cases[tag][t,nonzerocase],θ)) end
+            nonzerocase=cases[tag][t,2:end].!=0 # to avoid Gamma(0,θ)
+            if sum(nonzerocase)!=0 @views infness[tag][t,2:end][nonzerocase].=rand.(Gamma.(α.*cases[tag][t,2:end][nonzerocase],θ)) end
             #distribute infness on timeline
-            hazard.loc[t+1:end,:] .+= (@view infness[tag][t:t,:]).*gtimevec[1:length(observed.loc)-t]
+            hazard.loc[t+1:end,2:end] .+= (@view infness[tag][t:t,2:end]).*gtimevec[1:length(observed.loc)-t]
             @views lweights.+=logpdf.(Poisson.(detectprob[t].*hazard[tag][t,:]),observed[tag][t])
         end
-        if(2logsumexp(lweights)-logsumexp(2 .*lweights)< log(nsample)-log(2))
-        # resample
-            lkh.+=lweights
-        if all(lweights.≤-Inf) break end
+        if 2logsumexp(lweights)-logsumexp(2 .*lweights)< log(nsample)-log(2) || t==length(observed.loc)
+            llkh+=logsumexp(lweights)-log(nsample)
+            if all(lweights.≤-Inf) break end
             lweights.-=maximum(lweights)
             newid=sysresample(exp.(lweights))
-        for tag in keys(cases)
-            @views infness[tag][1:t,:].=infness[tag][1:t,newid]
-            @views cases[tag][1:t,:].=cases[tag][1:t,newid]
-        end
+            @views newid.=[1;newid[Not(rand(1:nsample))]]
+            for tag in keys(cases)
+                @views infness[tag][1:t,:].=infness[tag][1:t,newid]
+                @views cases[tag][1:t,:].=cases[tag][1:t,newid]
+            end
             @views hazard.loc[1:t,:].=hazard.loc[1:t,newid]
-            @views lkh.=lkh[newid]
             lweights.=0.0
         end
+        # resample
+        
     end
-    return(lkh)
+    return(llkh)
 end
 function infcasesgibbs!(infness,cases,hazard,nsamples,branchdist,gtimedist,observed,detectprob,tlen)
     # infness
     infness_pts=(imported=zeros(tlen,nsamples), loc=zeros(tlen,nsamples))
     hazard_pts=(imported=hazard.imported,loc=zeros(tlen,nsamples))
     cases_pts=(imported=zeros(Int,tlen,nsamples),loc=zeros(Int,tlen,nsamples))
+    # Pass the reserved particle for conditional particle filter
+    for tag in keys(infness)
+        infness_pts[tag][:,1].=infness[tag]
+        cases_pts[tag][:,1].=cases[tag]
+    end
+    hazard_pts.loc[:,1].=hazard.loc
+    
     gtimevec=diff(cdf.(gtimedist,0:tlen))
     counts=0
-    lls=zeros(nsamples)
+    ll=0.0
     while true
         infness_pts.imported.=0.0
         infness_pts.loc.=0.0
         hazard_pts.loc.=0.0
-        lls.=smcinfcases!(infness_pts,cases_pts,hazard_pts,params(branchdist),gtimevec,observed,detectprob)
+        ll=smcinfcases!(infness_pts,cases_pts,hazard_pts,params(branchdist),gtimevec,observed,detectprob)
         counts+=1
-        if sum(lls)>-Inf break end
+        if ll>-Inf break end
         if counts>100 error("infness could not be sampled in 100 SMC iterations") end
     end
-    # sample from lls
-    sampleid=sample(Weights(exp.(lls.-maximum(lls))))
+
+    # sample one particle
+    sampleid=sample(1:nsample)
     if isnan(sampleid) sanpleid=1 end
     @views infness.imported.=infness_pts.imported[:,sampleid]
     @views infness.loc.=infness_pts.loc[:,sampleid]
     @views cases.imported.=cases_pts.imported[:,sampleid]
     @views cases.loc.=cases_pts.loc[:,sampleid]
     @views hazard.loc.=hazard_pts.loc[:,sampleid]
-    lls
+    ll
 end
 
 function llnbdist(nbparm,infness,cases)
