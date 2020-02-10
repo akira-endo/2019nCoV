@@ -53,7 +53,7 @@
 # where $Q(t)$ is the baseline reporting probability at time $t$ and $\delta(t)$ is the factor reflecting the delay. We assume the distribution of reporting delays follow an exponential distribution with mean $d$.
 
 # ## Statistical analysis
-# We assumed the observed imported/local cases $I_t,J_t$ and the serial interval distribution $S_t$ are given. Of the unkown variables, $i_t$, $j_t$ and $\lambda_t$ are sampled by the particle-Gibbs algorithm and the remaining variables $R_0, k, h_0,r,d$ are sampled by No-U-turn sampler (NUTS).
+# We assumed the observed imported/local cases $I_t,J_t$ and the serial interval distribution $S_t$ are given. Of the unkown variables, $i_t$, $j_t$ and $\lambda_t$ are integrated out by the particle-Metropolis-Hastings algorithm and the remaining variables $R_0, k, h_0,r,q,d$ are inferred.
 #
 
 
@@ -239,7 +239,7 @@ for parname in keys(parms)
     priors[parname]=Stochastic(()->Uniform(0,5))
 end
 #priors[:nlogq]=Stochastic(1,()->Uniform(0,5))
-dotter=[10]
+dotter=[100]
 inputs=Dict{Symbol,Any}(
     :observed=>observed,
     :paths=>paths,
@@ -267,12 +267,13 @@ model=Model(
     lltotal=Logical((ll_smc,invtemp)->ll_smc*invtemp
         , false),
     zerotrick=Stochastic((lltotal,i,j)->Poisson(-lltotal),false),
-    counter=Logical((counter,k)->begin
+    count=Logical((counter,k)->begin
             counter[1].+=1
             if counter[1][1]==counter[2][1]
                 counter[1].=0
                 print(".")
             end
+            counter[1][1]
         end
             );
     priors...
@@ -283,7 +284,7 @@ setsamplers!(model,[AMM(collect(keys(parms)),Matrix{Float64}(I,fill(length(keys(
 
 # +
 mcmclen=10000
-dotter.=mcmclen//100
+dotter.=div(mcmclen,10)
 
 chain = mcmc(model, inputs, inits, mcmclen, burnin=2000, thin=2, chains=1)
 # -
@@ -296,9 +297,12 @@ im=median(i,dims=1)[1,:,1]
 j=chain[:,:j,:].value
 jm=median(j,dims=1)[1,:,1]
 q=median(hcat([detectprob((q=exp(-chain[t,:nlogq,1].value[1]),delayrate=chain[t,:delayrate,1].value[1])) for t in chain.range]...),dims=2)
-PyPlot.plot.([im,jm,q.*100])
+inferredvars=PyPlot.plot.([jm,im,q.*100])
+PyPlot.legend(getindex.(inferredvars,1),["jₜ: imported cases","iₜ: local cases","detection probability (%)"]);
 
 
+@show fittodata=PyPlot.plot.([observed.imported,jm.*q[:,1],observed.loc,im.*q[:,1]])
+PyPlot.legend(getindex.(fittodata,1),["Jₜ","E(Jₜ)","Iₜ","E(Iₜ)"]);
 using RCall;@rimport graphics as rg;
 rg.pairs(chain[:,[:nlogq,:R₀,:k,:h₀,:r],:].value[:,:,1])
 
