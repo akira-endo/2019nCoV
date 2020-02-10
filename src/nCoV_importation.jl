@@ -54,6 +54,7 @@
 
 # ## Statistical analysis
 # We assumed the observed imported/local cases $I_t,J_t$ and the serial interval distribution $S_t$ are given. Of the unkown variables, $i_t$, $j_t$ and $\lambda_t$ are sampled by the particle-Gibbs algorithm and the remaining variables $R_0, k, h_0,r,d$ are sampled by No-U-turn sampler (NUTS).
+
 #
 
 
@@ -65,11 +66,11 @@
 using DataFrames, Dates, PyPlot
 # Imported and local cases outside China
 # Source (accessed 4/2/2020): https://www.who.int/docs/default-source/coronaviruse/situation-reports/20200204-sitrep-15-ncov.pdf
-dates=Date("2019-12-31"):Day(1):Date("2020-2-1")
-china_hubei  =[1,0,0,2,0,1,0,0,0,1,1,0,0,1,2,0,3,3,1,3,3,7,3,9,6,8,5,4,3,3,4,1,0]
-china_unknown=[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0]
-localcases   =[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,1,1,2,0,0,0,1,1,0,0,1,2,0,0,0]
-u_inv     =[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,1,0,0,1,0,1]
+dates=Date("2019-12-31"):Day(1):Date("2020-2-2")
+china_hubei  =[1,0,0,2,0,1,0,0,0,1,1,0,0,1,2,0,3,3,1,3,3,7,3,9,6,8,5,4,3,3,4,1,0,0]
+china_unknown=[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0]
+localcases   =[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,1,1,2,0,0,0,1,1,0,0,1,2,0,0,0,0]
+u_inv        =[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,1,0,0,1,0,1,0]
 casedata=DataFrame([dates,china_hubei,china_unknown,localcases,u_inv], [:date,:china_hubei,:china_unknown,:loc,:underinv])
 barplots=PyPlot.bar.(Ref(1:length(casedata.date)),[Vector(casedata[:,c]) for c in 2:5],0.8,[cumsum(hcat(zeros(Int,length(casedata.date)),Matrix(casedata[:,2:5])),dims=2)[:,c] for c in 1:4])
 PyPlot.xticks(1:length(casedata.date),dates,rotation="vertical")
@@ -93,7 +94,7 @@ observed=(imported=imported,loc=loc);
 
 # +
 # Packages
-using Mamba, Distributions
+using Mamba, Distributions, LinearAlgebra
 # Distributions
 NBmu(mu,k)=NegativeBinomial(k,mu/(mu+k))
 Gmusd(mu,sd)=Gamma(mu^2/sd^2, sd^2/mu)
@@ -121,41 +122,40 @@ function sysresample(weights)
     freqs=randomiser.-[0; randomiser[1:end-1]]
     return(reduce(vcat,fill.(1:size,freqs)))
 end
-# -
-
-# ## Simulation functions
 
 # +
-using Distributions, StatsFuns, StatsBase, SpecialFunctions
-function smcinfcases!(infness::NamedTuple{(:imported,:loc),T} where T,cases::NamedTuple{(:imported,:loc),T} where T,hazard::NamedTuple{(:imported,:loc),T} where T,nbparm,gtimevec,observed,detectprob)
-    nsample=size(infness.imported,2)
+# ## Simulation functions
+using Distributions, StatsFuns, StatsBase, SpecialFunctions, Parameters
+function particlegibbs!(infness_pts::NamedTuple{(:imported,:loc),T} where T,cases_pts::NamedTuple{(:imported,:loc),T} where T,hazard_pts::NamedTuple{(:imported,:loc),T} where T,nbparm,detectprob,gtimevec,observed)
+    nsample=size(infness_pts.imported,2)
+    tlen=length(observed.loc)
     lweights=zeros(nsample)
     llkh=0.0
     α,p=nbparm
     θ=(1-p)/p
     for t in 1:length(observed.loc)
         # draw cases
-        @views cases.imported[t,2:end].=observed.imported[t].+rand.(Poisson.((1-detectprob[t]).*hazard.imported[t]))
-        @views cases.loc[t,2:end].=observed.loc[t].+rand.(Poisson.((1-detectprob[t]).*hazard.loc[t,2:end]))
-        for tag in keys(cases)
+        @views cases_pts.imported[t,2:end].=observed.imported[t].+rand.(Poisson.((1-detectprob[t]).*hazard_pts.imported[t]))
+        @views cases_pts.loc[t,2:end].=observed.loc[t].+rand.(Poisson.((1-detectprob[t]).*hazard_pts.loc[t,2:end]))
+        for tag in keys(cases_pts)
             #draw gamma: total offsprings
-            nonzerocase=cases[tag][t,2:end].!=0 # to avoid Gamma(0,θ)
-            if sum(nonzerocase)!=0 @views infness[tag][t,2:end][nonzerocase].=rand.(Gamma.(α.*cases[tag][t,2:end][nonzerocase],θ)) end
-            #distribute infness on timeline
-            hazard.loc[t+1:end,2:end] .+= (@view infness[tag][t:t,2:end]).*gtimevec[1:length(observed.loc)-t]
-            @views lweights.+=logpdf.(Poisson.(detectprob[t].*hazard[tag][t,:]),observed[tag][t])
+            nonzerocase=cases_pts[tag][t,2:end].!=0 # to avoid Gamma(0,θ)
+            if sum(nonzerocase)!=0 @views infness_pts[tag][t,2:end][nonzerocase].=rand.(Gamma.(α.*cases_pts[tag][t,2:end][nonzerocase],θ)) end
+            #distribute infness_pts on timeline
+            hazard_pts.loc[t+1:end,2:end] .+= (@view infness_pts[tag][t:t,2:end]).*gtimevec[1:length(observed.loc)-t]
+            @views lweights.+=logpdf.(Poisson.(detectprob[t].*hazard_pts[tag][t,:]),observed[tag][t])
         end
+        if all(lweights.≤-Inf) llkh=-Inf;break end
         if 2logsumexp(lweights)-logsumexp(2 .*lweights)< log(nsample)-log(2) || t==length(observed.loc)
             llkh+=logsumexp(lweights)-log(nsample)
-            if all(lweights.≤-Inf) break end
             lweights.-=maximum(lweights)
             newid=sysresample(exp.(lweights))
             @views newid.=[1;newid[Not(rand(1:nsample))]]
-            for tag in keys(cases)
-                @views infness[tag][1:t,:].=infness[tag][1:t,newid]
-                @views cases[tag][1:t,:].=cases[tag][1:t,newid]
+            for tag in keys(cases_pts)
+                @views infness_pts[tag][1:t,:].=infness_pts[tag][1:t,newid]
+                @views cases_pts[tag][1:t,:].=cases_pts[tag][1:t,newid]
             end
-            @views hazard.loc[1:t,:].=hazard.loc[1:t,newid]
+            @views hazard_pts.loc[1:t,:].=hazard_pts.loc[1:t,newid]
             lweights.=0.0
         end
         # resample
@@ -163,18 +163,19 @@ function smcinfcases!(infness::NamedTuple{(:imported,:loc),T} where T,cases::Nam
     end
     return(llkh)
 end
-function infcasesgibbs!(infness,cases,hazard,nsamples,branchdist,gtimedist,observed,detectprob,tlen)
-    # infness
-    infness_pts=(imported=zeros(tlen,nsamples), loc=zeros(tlen,nsamples))
-    hazard_pts=(imported=hazard.imported,loc=zeros(tlen,nsamples))
-    cases_pts=(imported=zeros(Int,tlen,nsamples),loc=zeros(Int,tlen,nsamples))
+function infcasesgibbs!(paths,nsamples,branchdist,gtimedist,observed,detectprob,tlen)
+    particles=(infness_pts=(imported=zeros(tlen,nsample), loc=zeros(tlen,nsample)),
+    hazard_pts=(imported=paths.hazard.imported,loc=zeros(tlen,nsample)),
+    cases_pts=(imported=zeros(Int,tlen,nsample),loc=zeros(Int,tlen,nsample)))
+    @unpack infness_pts,cases_pts,hazard_pts = particles
+    @unpack infness,cases,hazard=paths
+
     # Pass the reserved particle for conditional particle filter
     for tag in keys(infness)
         infness_pts[tag][:,1].=infness[tag]
         cases_pts[tag][:,1].=cases[tag]
     end
     hazard_pts.loc[:,1].=hazard.loc
-    
     gtimevec=diff(cdf.(gtimedist,0:tlen))
     counts=0
     ll=0.0
@@ -182,7 +183,7 @@ function infcasesgibbs!(infness,cases,hazard,nsamples,branchdist,gtimedist,obser
         infness_pts.imported.=0.0
         infness_pts.loc.=0.0
         hazard_pts.loc.=0.0
-        ll=smcinfcases!(infness_pts,cases_pts,hazard_pts,params(branchdist),gtimevec,observed,detectprob)
+        ll=particlegibbs!(infness_pts,cases_pts,hazard_pts,params(branchdist),detectprob,gtimevec,observed)
         counts+=1
         if ll>-Inf break end
         if counts>100 error("infness could not be sampled in 100 SMC iterations") end
@@ -199,18 +200,21 @@ function infcasesgibbs!(infness,cases,hazard,nsamples,branchdist,gtimedist,obser
     ll
 end
 
-function llnbdist(nbparm,infness,cases)
+function llnbdist(nbparm,paths)
+    @unpack infness,cases=paths
     α,p=nbparm
     θ=(1-p)/p
     ll=0.0
     tlen=length(infness.imported)
     for tag in keys(infness)
-        for t in 1:tlen if cases[tag][t]==0 && infness[tag][t]>0.0 ll=-Inf; break end end
+        for t in 1:tlen if (cases[tag][t]==0 && infness[tag][t]>0.0) ll=-Inf; break end end
         ll+=sum((logpdf(Gamma(α*cases[tag][t],θ),infness[tag][t]) for t in 1:tlen if cases[tag][t]>0))
+        if isnan(ll) ll=-Inf;break end
     end
     ll
 end
-function lldetectprob(detectprob,cases,observed)
+function lldetectprob(detectprob,paths,observed)
+    @unpack cases,infness=paths
     ll=0.0
     tlen=length(infness.imported)
     for tag in keys(infness)
@@ -218,36 +222,45 @@ function lldetectprob(detectprob,cases,observed)
     end
     ll
 end
-function llimporthazard(h0r,cases)
-    h0,r=h0r
+function llimporthazard(param,paths)
+    @unpack cases=paths
     ll=0.0
     tlen=length(cases.imported)
-    ll+=sum((logpdf(Poisson(h0*exp(r*(t-Dates.value(newyeardate-initdate)-1))),cases.imported[t]) for t in 1:tlen))
+    imphaz=importhazard(param)
+    ll+=sum((logpdf(Poisson(imphaz[t]),cases.imported[t]) for t in 1:tlen))
     ll
+end
+
+function importhazard(param)
+    @unpack h₀,r=param
+    @. h₀*exp(r*((1:tlen)-Dates.value(newyeardate-initdate)-1))
+end
+function detectprob(param)
+    @unpack q,delay=param
+    @. q*(1.0-exp(-1/delay*(tlen-(1:tlen))))
 end
 
 
 # +
 # test simulation run
+
 nb=NBmu(2,0.5)
 gt=Gmusd(7,1)
 R0=2
 k=0.5
-h0=0.02
-r=0.01
+h0=10.0
+r=0.05
 qt=fill(0.1,tlen)
+nsample=100
 
-cases=(imported=observed.imported.*2,loc=observed.loc.*2)
-imphazard=[h0*exp(r*t) for t in 1:tlen]
-lochazard=ones(tlen)
-hazard=(imported=imphazard,loc=lochazard)
-infness=(imported=observed.imported.+0.0,loc=observed.loc.+0.0)
-@time lls=infcasesgibbs!(infness,cases,hazard,2000,nb,gt,observed,qt,tlen)
-#@time lls=infnessgibbs!(infness,hazard.loc,500,nb,gt,tlen,cases);
-#@time casescondsampler!(cases,infness,hazard,params(nb),observed,q);
-@time llnbdist(params(nb),infness,cases)
-@time lldetectprob(qt,cases,observed)
-@time llimporthazard((h0,r),cases)
+paths=(hazard=(imported=importhazard((h₀=h0,r=r)),loc=zeros(tlen)),
+        cases=(imported=zeros(Int,tlen),loc=zeros(Int,tlen)),
+        infness=(imported=observed.imported.+0.0,loc=observed.loc.+0.0))
+
+@time lls=infcasesgibbs!(paths,nsample,nb,gt,observed,qt,tlen)
+@time llnbdist(params(nb),paths)
+@time lldetectprob(qt,paths,observed)
+@time llimporthazard((h₀=h0,r=r),paths)
 using RCall;@rimport base as R
 @show R.table(lls)
 mean(lls)
@@ -262,248 +275,105 @@ parms=Dict{Symbol,Any}(
     :r=>0.1,
     :R₀=>1.0,
     :k=>0.5,
-    :nlogq=>ones(Float64,tlen)
+    :nlogq=>0.5,
+    :delay=>10.0
 )
 priors=Dict{Symbol,Any}()
 for parname in keys(parms)
     priors[parname]=Stochastic(()->Uniform(0,5))
 end
-priors[:nlogq]=Stochastic(1,()->Uniform(0,5))
-
+priors[:delay]=Stochastic(()->Uniform(0,20))
+dotter=[100]
 inputs=Dict{Symbol,Any}(
     :SI=>serialint,
     :observed=>observed,
-    :infness=>infness,
-    :cases=>cases,
+    :paths=>paths,
     :zerotrick=>0.0,
-    :invtemp=>1.0
+    :invtemp=>1.0,
+    :smcsize=>100,
+    :counter=>([0],dotter)
 )
 
 inits=merge(parms,inputs)
 inits=[inits]
 
 model=Model(
-    j=Logical(1,(cases)-> cases.imported),
-    i=Logical(1,(cases)-> cases.loc),
+    j=Logical(1,(paths,k)-> paths.cases.imported),
+    i=Logical(1,(paths,k)-> paths.cases.loc),
     ll_smc=Logical(()->0.0,false),
     
     ll_nb=Logical(
-        (R₀,k,infness,cases)->begin ll=llnbdist((R₀,k),infness,cases);print("");ll end
+        (R₀,k,paths)->llnbdist(params(NBmu(R₀,k)),paths)
         , false
     ),
     ll_q=Logical(
-        (nlogq,i,j,observed)->begin
-            qt=exp.(.-nlogq)
-            return(lldetectprob(qt,(imported=j,loc=i),observed))
+        (nlogq,delay,paths,observed)->begin
+            qt=detectprob((q=exp(-nlogq),delay=delay))
+            return(lldetectprob(qt,paths,observed))
         end
         , false),
     ll_h=Logical(
-        (h₀,r,j)->begin llimporthazard((h₀,r),(imported=j,)) end
+        (h₀,r,paths)->llimporthazard((h₀=h₀,r=r),paths)
         , false),
     lltotal=Logical((ll_nb,ll_q,ll_h,ll_smc,invtemp)->sum((ll_nb,ll_q,ll_h,ll_smc))*invtemp
         , false),
-    zerotrick=Stochastic((lltotal)->Poisson(-lltotal),false);
+    zerotrick=Stochastic((lltotal)->begin Poisson(-lltotal) end,false),
+    count=Logical((counter,k)->begin
+
+            counter[1][1]
+        end
+    );
     priors...
 )
 
 infcasessample=Sampler(
-    [:i,:j],
-    (R₀,k,h₀,r,nlogq,i,j,cases,infness,observed)->begin
-        hazard=(imported=h₀*exp.(r.*(Dates.value.(timelines.-newyeardate))),loc=zeros(tlen))
+    [:ll_smc],
+    (R₀,k,h₀,r,nlogq,delay,observed,paths,counter)->begin
+        paths.hazard.imported.=importhazard((h₀=h₀,r=r))
         nb=NBmu(R₀,k)
-        cases=(imported=j,loc=i)
-        infcasesgibbs!(infness,cases,hazard,smcsize,nb,serialint.dist,observed,qt,tlen)
-        i,j=cases
-        [i,j]
-        print(".")
+        ll=infcasesgibbs!(paths,smcsize,nb,serialint.dist,observed,qt,tlen)
+        i,j=paths.cases
+        #counter
+        counter[1].+=1
+        if counter[1][1]==counter[2][1]
+            counter[1].=0
+            print(".")
+        end
+        ll
     end
 )
 
-compositesampler=Sampler(
-    [:i,:j,:R₀,:k,:h₀,:r,:nlogq],
-    (R₀,k,h₀,r,nlogq,i,j,cases,infness,observed,ll_nb,ll_q,ll_h)->begin
-        # Gibbs sample with SMC
-        hazard=(imported=h₀*exp.(r.*(Dates.value.(timelines.-newyeardate))),loc=zeros(tlen))
-        nb=NBmu(R₀,k)
-        cases=(imported=j,loc=i)
-        infcasesgibbs!(infness,cases,hazard,smcsize,nb,serialint.dist,observed,qt,tlen)
-        i,j=cases
-        [i,j]
-        print(".")
-        
-        # NUTS for the rest of the params
-        
-    end
-)
 
-setsamplers!(model,[NUTS(collect(keys(parms))),infcasessample])
 
+setsamplers!(model,[NUTS(collect(keys(parms))),infcasessample]);
+setsamplers!(model,[AMM(collect(keys(parms)),Matrix{Float64}(I,6,6).*0.05),infcasessample]);
+
+
+
+# +
+mcmclen=100000
+burn=div(mcmclen,5)
+dotter.=div(mcmclen,100)
+const smcsize=100
+
+chain = mcmc(model, inputs, inits, mcmclen, burnin=burn, thin=div(mcmclen,1000), chains=1)
 # -
 
-const smcsize=2000
-chain = mcmc(model, inputs, inits, 10, burnin=2, thin=2, chains=1)
+showparam=[:R₀,:k,:nlogq,:delay,:h₀,:r]
+@show Mamba.draw(Mamba.plot(chain[:,showparam,:]))
+# Visualise
+i=chain[:,:i,:].value
+im=median(i,dims=1)[1,:,1]
+j=chain[:,:j,:].value
+jm=median(j,dims=1)[1,:,1]
+q=median(hcat([detectprob((q=exp(-chain[t,:nlogq,1].value[1]),delay=chain[t,:delay,1].value[1])) for t in chain.range]...),dims=2)
+inferredvars=PyPlot.plot.([jm,im,q.*100])
+PyPlot.legend(getindex.(inferredvars,1),["jₜ: imported cases","iₜ: local cases","detection probability (%)"]);
 
-# +
-module MCMC
-struct MCMCStates
-    
-end
-end
-mcmc
 
-
-# +
-# Other functions currently not in use
-function importandbranch!(cases::NamedTuple{(:imported,:loc,:infness,:hazard),NTuple{4,Vector{R}}} where R<:Real,importhazard,nbparm,gtimevec,atleastone=false)
-    for t in 1:length(cases.loc)
-        if sum(vec[t] for vec in cases)+importhazard[t] == 0 continue end
-        
-        # draw cases
-        cases.imported[t]+=rand(Poisson(importhazard[t]))
-        cases.loc[t]+=rand(Poisson(cases.hazard[t]))
-        currinfs=cases.imported[t]+cases.loc[t]
-        
-        # draw gamma: total offsprings
-        if currinfs!=0
-            α,p=nbparm
-            θ=(1-p)/p
-            cases.infness[t]=rand(Gamma(α*currinfs,θ))
-            #distribute infness on timeline
-            cases.hazard[t+1:end].+=cases.infness[t].*gtimevec[1:length(cases.loc)-t]
-            else cases.infness[t]=0.0
-        end
-        
-        # if conditioned that infections ≧ 1
-        if atleastone
-            plusoneat=t+ceil(Int,sample(1:length(gtimevec),Weights(gtimevec)))
-            if plusoneat<=length(cases.loc) cases.loc[plusoneat]+=1 end
-            atleastone=false
-        end
-    end
-end
-# clusters generator
-function importcluster(nsample,branchdist,gtimedist,tlen,importhazard)
-    labels=(:imported,:loc,:infness,:hazard)
-    samples=[NamedTuple{labels}(collect((zeros(Float64,tlen) for j in 1:4))) for i in 1:nsample]
-    gtimevec=diff(cdf.(gtimedist,0:tlen))
-    importandbranch!.(samples,Ref(importhazard),Ref(params(branchdist)),Ref(gtimevec))
-    return(samples)
-end
-
-module ApproxSampler
-using Distributions, SpecialFunctions
-struct Vars_t{F<:AbstractFloat,T,I<:Integer}
-    infness::F
-    hazard::F
-    nbparm::T
-    observed::I
-    detectprob::F
-end
-function poisgammacond(vars::Vars_t,x::I where I<:Integer)
-    if infness==0.0
-        return(pdf(Poisson(vars.hazard),x)) #!!incomplete
-    end
-    if vars.observed==0 && x==0 return(exp(-vars.hazard)) end #!!incomplete
-    α,p=vars.nbparm
-    θ=(1-p)/p
-    poismean=(1-vars.detectprob)*vars.hazard*(vars.infness/θ)^α
-    pdf(Poisson(poismean),x)/gamma(α*(vars.observed+x))
-end
-function discreteapproxsampler(densityfunc,paramobj,upper,tol=1e-4)
-    u=rand()
-    sumcdf=0.0
-    Δcdf=0.0
-    xmax=0
-    while xmax≤upper ||  Δcdf/sumcdf>tol
-        Δcdf=densityfunc(paramobj,xmax)
-        sumcdf+=Δcdf
-        xmax+=1
-    end
-    funccdf=0.0
-    xsample=0
-    for x in 0:xmax-1
-        xsample=x
-        funccdf+=densityfunc(paramobj,x)/sumcdf
-        if funccdf≥u break end
-    end
-    return(xsample)
-end
-end
-function casescondsampler!(cases,infness,hazard,nbparm,observed,detectprob)
-    for tag in (:imported,:loc)
-        cases[tag].=observed[tag].+
-            ApproxSampler.discreteapproxsampler.(
-                ApproxSampler.poisgammacond,
-                ApproxSampler.Vars_t.(infness[tag],hazard[tag],Ref(nbparm),observed[tag],detectprob),
-                hazard[tag])
-    end
-end
-function casesgibbs()
-    
-end
-
-function smcinfness!(infness::NamedTuple{(:imported,:loc),T} where T,lochazard::Matrix{<:AbstractFloat},cases::NamedTuple{(:imported,:loc),T} where T,nbparm,gtimevec)
-    nsample=size(infness.imported,2)
-    lweights=zeros(nsample)
-    lkh=zeros(nsample)
-    α,p=nbparm
-    θ=(1-p)/p
-    for t in 1:length(cases.loc)
-        if cases.imported[t] != 0
-            # draw gamma: total offsprings
-            infness.imported[t,:].=rand(Gamma(α*cases.imported[t],θ),nsample)
-            #distribute infness on timeline
-            @views lochazard[t+1:end,:].+=infness.imported[t:t,:].*gtimevec[1:length(cases.loc)-t]
-        end
-        if cases.loc[t] != 0
-            # draw gamma: total offsprings
-            infness.loc[t,:].=rand(Gamma(α*cases.loc[t],θ),nsample)
-            #distribute infness on timeline
-            @views lochazard[t+1:end,:].+=infness.loc[t:t,:].*gtimevec[1:length(cases.loc)-t]
-        end
-        
-        # filter particle
-        @views lweights.+=logpdf.(Poisson.(lochazard[t,:]),cases.loc[t])
-        #if(2logsumexp(weights)-logsumexp(2 .*weights)< log(nsample)-log(2))
-            # resample
-
-            lkh.+=lweights
-        if all(lweights.≤-Inf) break end
-            lweights.-=maximum(lweights)
-            newid=sysresample(exp.(lweights))
-            @views infness.imported[1:t,:].=infness.imported[1:t,newid]
-            @views infness.loc[1:t,:].=infness.loc[1:t,newid]
-            @views lochazard[1:t,:].=lochazard[1:t,newid]
-            @views lkh.=lkh[newid]
-            lweights.=0.0
-        #end
-    end
-    return(lkh)
-end
-
-function infnessgibbs!(infness,lochazard,nsamples,branchdist,gtimedist,tlen,cases)
-    # infness
-    infness_pts=(imported=zeros(tlen,nsamples), loc=zeros(tlen,nsamples))
-    lochazard_pts=zeros(tlen,nsamples)
-    gtimevec=diff(cdf.(gtimedist,0:tlen))
-    counts=0
-    lls=zeros(nsamples)
-    while true
-        infness_pts.imported.=0.0
-        infness_pts.loc.=0.0
-        lochazard_pts.=0.0
-        lls.=smcinfness!(infness_pts,lochazard_pts,cases,params(branchdist),gtimevec)
-        counts+=1
-        if sum(lls)>-Inf break end
-        if counts>100 error("infness could not be sampled in 100 SMC iterations") end
-    end
-    # sample from lls
-    sampleid=sample(Weights(exp.(lls.-maximum(lls))))
-    if isnan(sampleid) sanpleid=1 end
-    @views infness.imported.=infness_pts.imported[:,sampleid]
-    @views infness.loc.=infness_pts.loc[:,sampleid]
-    @views lochazard.=lochazard_pts[:,sampleid]
-    lls
-end
+@show fittodata=PyPlot.plot.([observed.imported,jm.*q[:,1],observed.loc,im.*q[:,1]])
+PyPlot.legend(getindex.(fittodata,1),["Jₜ","E(Jₜ)","Iₜ","E(Iₜ)"]);
+using RCall;@rimport graphics as rg;
+rg.pairs(chain[:,[:nlogq,:R₀,:k,:h₀,:r],:].value[:,:,1])
 
 
