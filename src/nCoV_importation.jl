@@ -229,7 +229,7 @@ end
 
 # +
 # test simulation run
-nb=NBmu(2,3)
+nb=NBmu(2,0.5)
 gt=Gmusd(7,1)
 R0=2
 k=0.5
@@ -238,9 +238,9 @@ r=0.01
 qt=fill(0.1,tlen)
 
 cases=(imported=observed.imported.*2,loc=observed.loc.*2)
-importhazard=[h0*exp(r*t) for t in 1:tlen]
+imphazard=[h0*exp(r*t) for t in 1:tlen]
 lochazard=ones(tlen)
-hazard=(imported=importhazard,loc=lochazard)
+hazard=(imported=imphazard,loc=lochazard)
 infness=(imported=observed.imported.+0.0,loc=observed.loc.+0.0)
 @time lls=infcasesgibbs!(infness,cases,hazard,2000,nb,gt,observed,qt,tlen)
 #@time lls=infnessgibbs!(infness,hazard.loc,500,nb,gt,tlen,cases);
