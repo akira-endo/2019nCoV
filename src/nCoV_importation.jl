@@ -261,32 +261,34 @@ model=Model(
         nb=NBmu(R₀,k)
         qt=detectprob((q=exp(-nlogq),delayrate=delayrate))
         ll=llkhpf!(paths,smcsize,nb,serialint.dist,observed,qt,tlen)
-        print(".")
         ll
     end),
     lltotal=Logical((ll_smc,invtemp)->ll_smc*invtemp
         , false),
     zerotrick=Stochastic((lltotal,i,j)->Poisson(-lltotal),false),
-    count=Logical((counter,k)->begin
-            counter[1].+=1
-            if counter[1][1]==counter[2][1]
-                counter[1].=0
-                print(".")
-            end
-            counter[1][1]
-        end
-            );
+    count=Logical((counter,k)->0);
     priors...
 )
-
-setsamplers!(model,[AMM(collect(keys(parms)),Matrix{Float64}(I,fill(length(keys(parms)),2)...).*0.05)]);
+countup=Sampler([:count],
+    (count,counter)->begin
+        counter[1].+=1
+        if counter[1][1]==counter[2][1]
+            counter[1].=0
+            print(".")
+        end
+        count+=1
+    end
+)
+    
+setsamplers!(model,[AMM(collect(keys(parms)),Matrix{Float64}(I,fill(length(keys(parms)),2)...).*0.05),countup]);
 
 
 # +
-mcmclen=10000
-dotter.=div(mcmclen,10)
+mcmclen=100000
+burn=div(mcmclen,5)
+dotter.=div(mcmclen,100)
 
-chain = mcmc(model, inputs, inits, mcmclen, burnin=2000, thin=2, chains=1)
+chain = mcmc(model, inputs, inits, mcmclen, burnin=burn, thin=div(mcmclen,500), chains=1, verbose=true)
 # -
 
 showparam=[:R₀,:k,:nlogq,:delayrate,:h₀,:r]
@@ -305,5 +307,9 @@ PyPlot.legend(getindex.(inferredvars,1),["jₜ: imported cases","iₜ: local cas
 PyPlot.legend(getindex.(fittodata,1),["Jₜ","E(Jₜ)","Iₜ","E(Iₜ)"]);
 using RCall;@rimport graphics as rg;
 rg.pairs(chain[:,[:nlogq,:R₀,:k,:h₀,:r],:].value[:,:,1])
+
+# Save chain
+using Serialization
+serialize(open("pmcmc_chain100000", "w"), chain)
 
 
