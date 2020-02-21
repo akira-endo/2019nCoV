@@ -63,6 +63,8 @@ WHO_data=modifydata("Malaysia","Local","Imported",1)
 WHO_data=modifydata("UK","Local","Imported",6)
 #††The exposure for 2 cases occurred outside of Spain
 WHO_data=modifydata("Spain","Local","Imported",2)
+# Isolated local case in Egypt 
+WHO_data=modifydata("Egypt","Local","Imported",1)
 
 # Remove Cruise ship data
 #WHO_data=WHO_data[-nrow(WHO_data),]
@@ -75,7 +77,7 @@ names(countrynames)=as.character(countrynames)
 counts=suppressWarnings(apply(t(daily_data[-(1:2),-(1:2)]),1:2,as.numeric))
 dates=as.Date("2020-1-13")+1:nrow(counts)-1
 dailydata=cbind(dates,as.data.frame(counts))
-rownames(dailydata)=NULL
+rownames(dailydata)=dailydata[,1]
 colnames(dailydata)=c("date",as.character(countrynames))
 
 # get dates of last reported case for each country
@@ -84,12 +86,14 @@ latestdates=data.frame(countrynames,latestdate=as.Date(apply(dailydata[,-1],2,fu
     as.character(dailydata[lastreported,1])
 })))
 
-# get the number of cases 
+# get the number of cases within the buffer period
+bufferdays=seq(currdate-buffer,currdate,by="days")
+ongoingbranches=colSums(dailydata[as.character(bufferdays),-1],na.rm=T)
 
-
-# reorder latestdates according to WHO data
+# reorder latestdates and ongoingbranches according to WHO data
 latestdates_WHO=latestdates[rownames(WHO_data),2]
-WHO_data=cbind(WHO_data,latestdate=latestdates_WHO)
+ongoingbranches_WHO=ongoingbranches[rownames(WHO_data)]
+WHO_data=cbind(WHO_data,latestdate=latestdates_WHO,ongoingbranches=ongoingbranches_WHO)
 head(WHO_data)
 ```
 
@@ -98,10 +102,12 @@ head(WHO_data)
 isextinct=WHO_data$latestdate<currdate-buffer
 icases=WHO_data$Imported
 lcases=WHO_data$Local
+ocases=WHO_data$ongoingbranches
 ```
 
 ```{r}
 # cluster size inference
+# for extinct clusters
 llextinct<-function(icases,lcases,R0,k){
     if(length(icases)==0)return(0)
     tcases=lcases+icases
@@ -109,7 +115,8 @@ llextinct<-function(icases,lcases,R0,k){
     sum(lls,na.rm=T)
 }
 
-llongoing<-function(icases,lcases,R0,k){
+# only use the number as the lower bound of cluster size for ongoing countries
+lltruncate<-function(icases,lcases,R0,k){
     if(length(icases)==0) return(0)
     ll=0
     for(i in 1:length(icases)){
@@ -123,13 +130,31 @@ llongoing<-function(icases,lcases,R0,k){
     return(ll)
 }
 
-lltotal<-function(nbparm,icases,lcases,isextinct){
+# use the info of cases before the buffer period
+llongoing<-function(icases,lcases,ocases,R0,k){
+    if(length(icases)==0)return(0)
+    tcases=lcases+icases
+    lls=log(k*icases)-log((k+1)*tcases-icases)+lchoose((k+1)*tcases-icases,tcases-icases)+(tcases-icases)*log(R0/k)-((k+1)*tcases-icases)*log(1+R0/k)
+    #adjust for ongoing branches
+    lls=lls-dnbinom(0,k,mu=R0,log=T)*ocases-lchoose(tcases,ocases)
+    sum(lls,na.rm=T)
+}
+
+lltotal<-function(nbparm,icases,lcases,ocases,isextinct){
     nbparm=exp(nbparm)
     R0=nbparm[1];k=nbparm[2]
-    llextinct(icases[isextinct],lcases[isextinct],R0,k)+llongoing(icases[!isextinct],lcases[!isextinct],R0,k)
+    llextinct(icases[isextinct],lcases[isextinct],R0,k)+llongoing(icases[!isextinct],lcases[!isextinct],ocases[!isextinct],R0,k)
 }
-lltotal_R0<-function(k,icases,lcases,isextinct,R0){
-    llextinct(icases[isextinct],lcases[isextinct],R0,k)+llongoing(icases[!isextinct],lcases[!isextinct],R0,k)
+lltotal_R0<-function(k,icases,lcases,ocases,isextinct,R0){
+    llextinct(icases[isextinct],lcases[isextinct],R0,k)+llongoing(icases[!isextinct],lcases[!isextinct],ocases[!isextinct],R0,k)
+}
+lltotal2<-function(nbparm,icases,lcases,isextinct){
+    nbparm=exp(nbparm)
+    R0=nbparm[1];k=nbparm[2]
+    llextinct(icases[isextinct],lcases[isextinct],R0,k)+lltruncate(icases[!isextinct],lcases[!isextinct],R0,k)
+}
+lltotal2_R0<-function(k,icases,lcases,isextinct,R0){
+    llextinct(icases[isextinct],lcases[isextinct],R0,k)+lltruncate(icases[!isextinct],lcases[!isextinct],R0,k)
 }
 ```
 
@@ -140,16 +165,15 @@ R0=runif(100,0,5);k=runif(100,0,5)
 all.equal(dnbinom(0,k,mu=R0,log=T),sapply(1:length(R0),function(x)llextinct(1,0,R0[x],k[x])))
 # sum up to (almost) 1 when R0<<1
 R0=runif(30)/2                                         
-lls=sapply(1:length(R0),function(x)llongoing(sample(1:5,1),3e4,R0[x],k[x]))
+lls=sapply(1:length(R0),function(x)lltruncate(sample(1:5,1),3e4,R0[x],k[x]))
 all.equal(exp(lls),numeric(length(R0)))
 ```
 
 ```{r}
 # Optimise
 #opt=optim(fn=lltotal,par=c(1,1),method="L-BFGS",lower=c(1e-2,1e-2),upper=c(10,10),icases=icases,lcases=lcases,isextinct=isextinct,control=list(fnscale=-1))
-#
 estimatek<-function(R0){
-    opt=optim(fn=lltotal_R0,par=1,method="Brent",lower=0,upper=5,icases=icases,lcases=lcases,isextinct=isextinct,R0=R0,control=list(fnscale=-1,trace=1))
+    opt=optim(fn=lltotal_R0,par=1,method="Brent",lower=0,upper=5,icases=icases,lcases=lcases,ocases=ocases,isextinct=isextinct,R0=R0,control=list(fnscale=-1,trace=1))
     opt$par
 }
 
@@ -162,10 +186,10 @@ plot(x=R0s,y=k_est)
 ```{r}
 # MCMC
 library(LaplacesDemon)
-Data=Data=list(N=13,mon.names=c("nlogl","R0"),parm.names="overdispersion k",R0=1,icases=icases,lcases=lcases,isextinct=isextinct)
+Data=Data=list(N=13,mon.names=c("nlogl","R0"),parm.names="overdispersion k",R0=1,icases=icases,lcases=lcases,ocases=ocases,isextinct=isextinct)
 Model=function(parm,Data){
     k=interval(parm,0)
-    ll=lltotal_R0(k,Data$icases,Data$lcases,Data$isextinct,Data$R0)
+    ll=lltotal_R0(k,Data$icases,Data$lcases,Data$ocases,Data$isextinct,Data$R0)
     return(list(LP=ll,Dev=-2*ll,Monitor=c(ll,Data$R0),yhat=NULL,parm=k))
 }
 #fit<-LaplacesDemon(Model=Model,Data=Data,Initial.Values=1,Covar=NULL,Iterations=10000,Status=1000,Thinning=10,Algorithm='HARM',Specs=NULL)
@@ -174,7 +198,7 @@ R0s=1:25/5
 niter=10000
 k_est=sapply(R0s,function(R0){
     Data$R0=R0
-    fit=LaplacesDemon(Model=Model,Data=Data,Initial.Values=1,Covar=NULL,Iterations=niter,Status=niter,Thinning=10,Algorithm='HARM',Specs=NULL)
+    fit=LaplacesDemon(Model=Model,Data=Data,Initial.Values=1,Covar=NULL,Iterations=niter,Status=niter,Thinning=10,Algorithm='HARM',Specs=list(alpha.star=0.23,B=NULL))
     fit$Posterior1[(niter%/%20):(niter%/%10)]
 })
 ```
@@ -183,8 +207,26 @@ k_est=sapply(R0s,function(R0){
 # Plot
 med=apply(k_est,2,median)
 cri=apply(k_est,2,function(x){quantile(x,c(0.025,0.975))})
-plot(x=R0s,y=med,xlim=c(0,5),ylim=c(0,1),type="l",xlab="R0",ylab="overdispersion")
+plot(x=R0s,y=med,xlim=c(0,5),ylim=c(0,5),type="l",xlab="R0",ylab="overdispersion")
 polygon(x=c(R0s,rev(R0s)),y=c(cri[1,],rev(cri[2,])),lty=0,col=rgb(0,0,0,0.1))
+```
+
+```{r}
+# Joint estimation
+Data=Data=list(N=13,mon.names=c("nlogl","R0"),parm.names=c("R0","k"),icases=icases,lcases=lcases,ocases=ocases,isextinct=isextinct)
+Model_joint=function(parm,Data){
+    parm=interval(parm,0)
+    ll=lltotal(parm,Data$icases,Data$lcases,Data$ocases,Data$isextinct)
+    return(list(LP=ll,Dev=-2*ll,Monitor=c(ll,0),yhat=NULL,parm=parm))
+}
+#fit<-LaplacesDemon(Model=Model,Data=Data,Initial.Values=1,Covar=NULL,Iterations=10000,Status=1000,Thinning=10,Algorithm='HARM',Specs=NULL)
+niter=10000
+fit=LaplacesDemon(Model=Model_joint,Data=Data,Initial.Values=c(1,1),Covar=NULL,Iterations=niter,Status=niter,Thinning=10,Algorithm='HARM',Specs=list(alpha.star=0.23,B=NULL))
+
+```
+
+```{r}
+pairs(fit$Posterior1[,1:2])
 ```
 
 ```{r}
